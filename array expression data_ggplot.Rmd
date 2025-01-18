@@ -1,0 +1,49 @@
+---
+title: "plotting array expression data (excel file) with ggplot2"
+output: github_document
+---
+
+
+
+```{r}
+library(readxl)
+library(tidyverse)
+```
+```{r}
+# Data used here is from study by Belland et al. 2003 (https://www.pnas.org/doi/10.1073/pnas.1331135100)
+# loading data and pre-processing to remove unwanted columns and rows, rename columns. 
+array_data = read_excel("/Users/prakashsah/Github/ggplot2/1135table2.xls")
+array_data = array_data[-c(1,2,3), -c(1,2,3,5)]
+colnames(array_data)=c("Gene", "1_Expression", "1_SD", "3_Expression", "3_SD", "8_Expression", "8_SD","16_Expression", "16_SD", "24_Expression", "24_SD", "40_Expression", "40_SD")
+head(array_data)
+```
+```{r}
+# change data to longer format and convert time as factor
+array_data_long = array_data%>%pivot_longer(cols = -1, names_to = c("Time", "Measure"), names_sep="_", values_to="Value")
+tidy_data=array_data_long%>%pivot_wider(names_from = Measure, values_from = Value)
+tidy_data <- tidy_data %>% mutate(Time = factor(Time, levels=c("1","3","8","16","24","40")), Expression = as.numeric(as.character(Expression)), SD = as.numeric(as.character(SD)))
+head(tidy_data)
+```
+```{r}
+# plot expression of a putative operon consisting of genes CT224-CT229
+selected_gene = c("CT224", "CT225", "CT226", "CT227", "CT228", "CT229")
+selected_data = tidy_data%>%filter(Gene %in% selected_gene) #subset data for CT226-CT229 genes
+selected_data
+plot=ggplot(selected_data, aes(x = Time, y = Expression, color = Gene, group = Gene)) +
+  geom_line() +
+  geom_point() +
+  labs (
+    title = "Gene expression of CT224-CT229 over time",
+    x = "Time",
+    y = "Expression level ", 
+    color = "Gene"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12)
+  )
+plot
+```
+
+
