@@ -1,0 +1,154 @@
+---
+title: "Analysis of TCGA-LIHC RNASeq dataset"
+author: "Prakash Sah"
+date: "2025-01-18"
+output: pdf_document
+---
+
+This document presents an analysis of RNA-seq data from the TCGA-LIHC (Liver Hepatocellular Carcinoma) cohort, part of The Cancer Genome Atlas (TCGA) project. TCGA provides a valuable resource of publicly available genomic, epigenomic, and transcriptomic datasets across various cancer types. For this analysis, pre-processed STAR-aligned gene count data was used, rather than raw FASTQ files, to reduce computational demands. The workflow focuses on commonly performed downstream RNA-seq analyses, such as normalization, differential expression, and visualization, rather than alignment and read processing.
+
+To begin, ensure that all necessary libraries are loaded for the analysis. These include:
+TCGAbiolinks – for accessing and downloading TCGA data
+SummarizedExperiment – for managing and manipulating assay data
+DESeq2 – for differential expression analysis
+AnnotationDbi and org.Hs.eg.db – for gene annotation and ID mapping
+EnhancedVolcano – for creating volcano plots
+ComplexHeatmap – for generating detailed and customizable heatmaps
+These packages form the foundation for preprocessing, analysis, and visualization of the TCGA-LIHC RNA-seq dataset.
+```{r, include=FALSE}
+library(TCGAbiolinks)
+library(tidyverse)
+library(SummarizedExperiment)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+library(clusterProfiler)
+```
+Download and prepare TCGA-LIHC dataset
+In this analysis, RNA-seq data from the TCGA-LIHC (Liver Hepatocellular Carcinoma) cohort has been used, with gene-level counts generated using the STAR aligner. These STAR count files can be downloaded directly from the TCGA database using the TCGAbiolinks package. Alternatively, users can manually download the dataset from the TCGA GDC portal and load it using the GDCprepare() function.
+
+For demonstration purposes, the data download code is included but commented out, as the dataset was already available locally for this analysis.
+```{r}
+# create query
+query_LIHC = GDCquery(project = "TCGA-LIHC", data.category = "Transcriptome Profiling", data.type = "Gene Expression Quantification")
+#GDCdownload(query)
+TCGA_LIHC_data = GDCprepare(query = query_LIHC, directory = "/Users/prakashsah/Github/DESeq2/GDCdata", save = FALSE)
+
+```
+```{r}
+#Extract count matrix and column data
+LIHC_counts_mat = assay(TCGA_LIHC_data)
+coldata= colData(TCGA_LIHC_data)
+```
+Differential expression analysis
+
+We begin by creating a DESeq2 object and performing differential expression analysis using the DESeq() function. TCGA RNA-seq datasets typically use Ensembl gene IDs with version numbers as row names. To make downstream interpretation and visualization easier, it's useful to convert these to gene symbols. At a minimum, the version numbers should be stripped from the Ensembl IDs to allow compatibility with gene set analysis tools. This step can be done either before or after differential expression analysis.
+```{r}
+# Create DESeq2 object using raw counts and sample metadata
+dds = DESeqDataSetFromMatrix(countData = LIHC_counts_mat, colData = coldata, design = ~ tissue_type)
+
+## Filter out genes with low counts (less than 10 reads across all samples)
+dds = dds[rowSums(counts(dds)) >= 10, ] 
+
+# Check the levels of 'tissue_type' to ensure the correct reference level is set
+# The reference group should be "Normal" for comparison; relevel if necessary
+dds$tissue_type
+# To relevel (if needed): dds$tissue_type <- relevel(dds$tissue_type, ref = "Normal")
+
+
+#Run differential expression analysis
+dds = DESeq(dds)
+res = results(dds)
+res #examine results
+
+# Add gene symbols to results using ENSEMBL IDs
+# First, remove version numbers from ENSEMBL IDs
+ensembl_ids_ver = rownames(res) #ensembl ids with version number
+ensembl_ids <- gsub("\\..*$", "", ensembl_ids_ver)
+head(ensembl_ids) # Confirm version numbers were removed
+
+# Map ENSEMBL IDs to gene symbols
+Symbol = mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "SYMBOL")
+res$Symbol = Symbol # Add gene symbols to results table
+head(res)
+
+```
+Principal Component Analysis (PCA)
+
+DESeq2 provides tools to perform Principal Component Analysis (PCA) on transformed count data using either regularized log transformation (rlog) or variance stabilizing transformation (VST). In this analysis, we use VST to stabilize variance across the range of counts, making the data more suitable for visualization and clustering.
+
+PCA is a dimensionality reduction technique that helps uncover major sources of variation in the dataset. It is particularly useful for exploring sample relationships, detecting batch effects, and identifying potential outliers.In the context of this TCGA-LIHC dataset, PCA can help assess whether tumor and normal liver tissue samples cluster separately, providing a quality check and confirming that the primary variation aligns with biological condition.
+```{r}
+#Perform PCA analysis
+vsd = vst(dds, blind = FALSE)
+plotPCA(vsd, intgroup= "tissue_type")
+```
+Heatmap of Top Differentially Expressed Genes (DEGs)
+
+Following the PCA analysis, we can further visualize the differential expression by generating a heatmap of the top differentially expressed genes (DEGs). A heatmap provides a clear, visual representation of the gene expression patterns across samples, with hierarchical clustering revealing how tumor and normal liver tissue samples group based on their gene expression profiles. The heatmap can highlight the most significantly different genes between conditions, helping to identify key biomarkers and assess the quality of the data.
+
+This heatmap will be created using the ComplexHeatmap package, which allows for customized and informative visualizations of gene expression data.
+```{r}
+#significant DEGs
+sig_degs <- res %>%
+as.data.frame() %>%
+filter(padj < 0.05, abs(log2FoldChange) > 1) %>%
+arrange(padj)
+
+top_30_degs = head(sig_degs, 30)
+
+#heatmap of top 30 DEGs
+norm_counts = assay(vsd)
+top30 = rownames(top_30_degs)
+top30_norm_counts = norm_counts[top30, ]
+
+#column annotation for heatmap
+coldata_tissue_type = data.frame(Condition = coldata$tissue_type)
+ha = HeatmapAnnotation(df = coldata_tissue_type,
+col = list(Condition = c("Tumor" = "red", "Normal" = "blue")))
+
+#change rownames to gene symbol from ensembl IDs
+top30_gene_names = top_30_degs$Symbol
+rownames(top30_norm_counts)=top30_gene_names
+rownames(top30_norm_counts)
+
+#plot heatmap
+Heatmap(t(scale(t(top30_norm_counts))),
+name = "Z-score",
+top_annotation = ha,
+cluster_columns = TRUE,
+show_column_names = FALSE,
+row_names_gp = gpar(fontsize = 10),
+column_title = "Top 30 DEGs in TCGA-LIHC")
+```
+A volcano plot is a widely used visualization for RNA-seq data, as it effectively displays the relationship between statistical significance (adjusted p-value) and magnitude of change (log2 fold change) for each gene. In this analysis, all genes from the res object are plotted as an example, but typically, a threshold for adjusted p-value (padj) and log2 fold change is applied to filter out genes with low significance or minimal expression changes.
+
+Here, the plot is generated using the EnhancedVolcano package, which offers a simple and informative way to display DEGs with customizable labels and color-coding.Volcano plots can also be created using base R or, alternatively, with ggplot2 for more flexibility in customizing the plot's appearance and adding additional annotations or highlights.
+```{r}
+EnhancedVolcano(res, x = "log2FoldChange", y = "padj", lab = res$Symbol, selectLab = top_30_degs$Symbol)
+```
+Gene ontology analysis
+
+GO enrichment analysis is performed using the clusterProfiler package to explore biological processes associated with the differentially expressed genes. Ensembl gene IDs (with version numbers removed) are used as input. Alternatively, gene symbols can be used by setting keyType = "SYMBOL". The analysis highlights functional themes enriched among up- or downregulated genes.
+```{r}
+# Gene Ontology (GO) enrichment analysis using clusterProfiler
+
+# Separate significantly upregulated and downregulated genes
+sig_up = sig_degs[sig_degs$log2FoldChange>0,]
+sig_down = sig_degs[sig_degs$log2FoldChange<0,]
+
+# Extract Ensembl gene IDs (remove version numbers) for GO analysis
+genes_up = gsub("\\..*$", "", rownames(sig_up))
+genes_down = gsub("\\..*$", "", rownames(sig_down))
+
+# Perform GO enrichment analysis for upregulated genes (Biological Process ontology)
+GO_up = enrichGO(gene = genes_up, OrgDb = "org.Hs.eg.db", keyType = "ENSEMBL", ont = "BP")
+plot(barplot(GO_up, showCategory = 20)) # Plot top 20 enriched GO terms
+
+# Perform GO enrichment analysis for downregulated genes (Biological Process ontology)
+GO_down = enrichGO(gene = genes_down, OrgDb = "org.Hs.eg.db", keyType = "ENSEMBL", ont = "BP")
+plot(barplot(GO_down, showCategory = 20)) # Plot top 20 enriched GO terms
+```
+
